@@ -17,6 +17,17 @@ export const authApi = {
     }
 
     return result.data
-  }
+  },
+
+  async completeTwoFactorLogin(challenge) {
+    const response = await api.post('/Auth/two-factor', challenge)
+    const result = response.data
+
+    if (!result.success) {
+      throw new Error(result.message || 'No fue posible verificar el código de doble factor.')
+    }
+
+    return result.data
+  },
 
 }

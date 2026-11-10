@@ -1,5 +1,5 @@
 <template>
-  <q-page class="emergency-page">
+  <q-page class="emergency-page" :aria-busy="cargando">
     <!-- =========================================================
          HEADER
     ========================================================== -->
@@ -39,7 +39,7 @@
       <q-card class="employee-card">
         <div class="employee-card-content">
           <q-avatar size="72px" class="employee-avatar">
-            <img src="../assets/perfil_Hombre.png" alt="Perfil" />
+            <img :src="empleado.photoUrl || fotoPerfilPredeterminada" alt="Perfil" />
           </q-avatar>
 
           <div class="employee-info">
@@ -139,11 +139,24 @@
             </q-input>
 
             <!-- Municipio -->
-            <q-input v-model="formPersonal.municipio" outlined dense label="Municipio">
+            <q-select
+              v-model="formPersonal.municipalityId"
+              outlined
+              dense
+              label="Municipio"
+              :options="municipiosNayarit"
+              option-label="name"
+              option-value="id"
+              emit-value
+              map-options
+              clearable
+              :loading="cargandoMunicipios"
+              :rules="[(val) => !!val || 'Seleccione un municipio']"
+            >
               <template #prepend>
                 <q-icon name="location_city" />
               </template>
-            </q-input>
+            </q-select>
 
             <!-- Domicilio -->
             <q-input
@@ -714,31 +727,40 @@
         </div>
       </q-card>
     </q-dialog>
+
+    <q-dialog v-model="guardando" persistent no-shake>
+      <q-card class="save-loading-card" role="status" aria-live="polite">
+        <q-spinner-dots size="48px" color="primary" />
+        <div>Se está guardando la información...</div>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { useRouter } from 'vue-router'
 
 import { useQuasar } from 'quasar'
+import { useAuthStore } from '@/stores/auth.store'
+import { employeeContactsApi } from '@/api/employee-contacts.api'
+import { employeesApi } from '@/api/employees.api'
+import { municipalitiesApi } from '@/api/municipalities.api'
+import fotoPerfilPredeterminada from '@/assets/perfil_Hombre.png'
 
 const router = useRouter()
 
 const $q = useQuasar()
+const authStore = useAuthStore()
 
 // ================================================================
 // EMPLEADO — DATOS LOCALES
 // ================================================================
 
-const empleado = ref({
-  nombre: 'Francisco Manuel Gutiérrez Iñiguez',
-
-  puesto: 'Programador',
-
-  area: 'Unidad de Tecnologías de la Información',
-})
+const empleado = ref({ nombre: '—', puesto: '—', area: '—', photoUrl: null })
+const cargando = ref(false)
+const guardando = ref(false)
 
 // ================================================================
 // DATOS PERSONALES
@@ -746,26 +768,16 @@ const empleado = ref({
 
 const datosIniciales = {
   estado: 'Nayarit',
-
-  municipio: 'Tepic',
-
-  domicilio: 'Calle Ejemplo #123, Col. Centro',
-
-  cp: '63000',
-
-  telefono: '3111234567',
-
-  telefono_Casa: '3117654321',
-
-  tipo_Sangre: 'O+',
-
-  alergias: 'Ninguna conocida',
-
-  leido: true,
-
-  acepta_Aviso_Privacidad: true,
-
-  uso_de_datos: true,
+  municipalityId: null,
+  domicilio: '',
+  cp: '',
+  telefono: '',
+  telefono_Casa: '',
+  tipo_Sangre: '',
+  alergias: '',
+  leido: false,
+  acepta_Aviso_Privacidad: false,
+  uso_de_datos: false,
 }
 
 const formPersonal = ref({
@@ -776,43 +788,81 @@ const formPersonal = ref({
 // CONTACTOS
 // ================================================================
 
-const contactos = ref([
-  {
-    id: 1,
+const contactos = ref([])
+const municipiosNayarit = ref([])
+const cargandoMunicipios = ref(false)
 
-    nombre: 'María',
+function mapearContacto(contacto) {
+  return {
+    ...contacto,
+    id: contacto.id,
+    nombre: contacto.name || contacto.nombre || '',
+    apellido_Paterno: contacto.paternalSurname || contacto.paternalName || contacto.apellido_Paterno || '',
+    apellido_Materno: contacto.maternalSurname || contacto.maternalName || contacto.apellido_Materno || '',
+    parentesco: contacto.relationship || contacto.parentesco || '',
+    telefono_Casa: contacto.homePhone || contacto.telefono_Casa || '',
+    telefono_Celular: contacto.mobilePhone || contacto.telefono_Celular || '',
+    telefono_Trabajo: contacto.workPhone || contacto.telefono_Trabajo || '',
+  }
+}
 
-    apellido_Paterno: 'López',
+function obtenerPayloadContacto() {
+  return {
+    name: formContacto.value.nombre.trim(),
+    paternalSurname: formContacto.value.apellido_Paterno.trim(),
+    maternalSurname: formContacto.value.apellido_Materno.trim(),
+    relationship: formContacto.value.parentesco,
+    homePhone: formContacto.value.telefono_Casa,
+    mobilePhone: formContacto.value.telefono_Celular,
+    workPhone: formContacto.value.telefono_Trabajo,
+  }
+}
 
-    apellido_Materno: 'Hernández',
+async function cargarCedula() {
+  cargando.value = true
+  cargandoMunicipios.value = true
+  try {
+    const [data, municipalities] = await Promise.all([
+      authStore.loadEmployee(),
+      municipalitiesApi.list(),
+    ])
+    municipiosNayarit.value = municipalities.filter(
+      (municipality) => municipality.stateName?.trim().toLocaleLowerCase() === 'nayarit',
+    )
+    empleado.value = {
+      nombre: data.fullName || '—',
+      puesto: data.positionName || '—',
+      area: data.areaName || '—',
+      photoUrl: data.photoUrl || null,
+    }
+    formPersonal.value = {
+      estado: 'Nayarit',
+      municipalityId: data.municipalityId || null,
+      domicilio: data.address || '',
+      cp: data.postalCode || '',
+      telefono: data.phone || '',
+      telefono_Casa: data.homePhone || '',
+      tipo_Sangre: data.bloodType || '',
+      alergias: data.allergies || '',
+      leido: Boolean(data.hasReadPrivacyNotice),
+      acepta_Aviso_Privacidad: Boolean(data.acceptsPrivacyNotice),
+      uso_de_datos: Boolean(data.allowsDataUse),
+    }
+    const rows = await employeeContactsApi.list(data.id)
+    contactos.value = rows.map(mapearContacto)
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error.message || 'No fue posible cargar la cédula de contacto.',
+      position: 'top-right',
+    })
+  } finally {
+    cargando.value = false
+    cargandoMunicipios.value = false
+  }
+}
 
-    parentesco: 'Madre',
-
-    telefono_Celular: '3112345678',
-
-    telefono_Casa: '3118765432',
-
-    telefono_Trabajo: '',
-  },
-
-  {
-    id: 2,
-
-    nombre: 'Juan',
-
-    apellido_Paterno: 'López',
-
-    apellido_Materno: 'Hernández',
-
-    parentesco: 'Hermana(o)',
-
-    telefono_Celular: '3119876543',
-
-    telefono_Casa: '',
-
-    telefono_Trabajo: '',
-  },
-])
+onMounted(cargarCedula)
 
 // ================================================================
 // CATÁLOGO PARENTESCO
@@ -895,7 +945,7 @@ const totalTelefonos = computed(() => {
 const cedulaCompleta = computed(() => {
   const personalCompleto = Boolean(
     formPersonal.value.estado &&
-    formPersonal.value.municipio &&
+    formPersonal.value.municipalityId &&
     formPersonal.value.domicilio &&
     (formPersonal.value.telefono || formPersonal.value.telefono_Casa),
   )
@@ -995,15 +1045,73 @@ const guardarDatosPersonales = () => {
     return
   }
 
-  $q.notify({
-    type: 'positive',
+  actualizarDatosEmpleado()
+}
 
-    icon: 'check_circle',
+async function actualizarDatosEmpleado() {
+  const employee = authStore.employee
+  if (!employee?.id) {
+    $q.notify({
+      type: 'negative',
+      message: 'No se encontró el identificador del empleado.',
+      position: 'top-right',
+    })
+    return
+  }
 
-    message: 'Información personal guardada correctamente.',
+  const payload = {
+    areaId: employee.areaId,
+    positionId: employee.positionId,
+    treatmentId: employee.treatmentId,
+    employeeTypeId: employee.employeeTypeId,
+    name: employee.name,
+    paternalSurname: employee.paternalSurname,
+    maternalSurname: employee.maternalSurname,
+    email: employee.email,
+    secondaryEmail: employee.secondaryEmail,
+    birthDate: employee.birthDate?.slice(0, 10),
+    rfc: employee.rfc,
+    curp: employee.curp,
+    voterKey: employee.voterKey,
+    socialSecurityNumber: employee.socialSecurityNumber,
+    phone: formPersonal.value.telefono,
+    gender: employee.gender,
+    isActive: employee.isActive,
+    address: formPersonal.value.domicilio,
+    municipalityId: formPersonal.value.municipalityId,
+    postalCode: formPersonal.value.cp,
+    homePhone: formPersonal.value.telefono_Casa,
+    bloodType: formPersonal.value.tipo_Sangre,
+    allergies: formPersonal.value.alergias,
+    acceptsPrivacyNotice: formPersonal.value.acepta_Aviso_Privacidad,
+    hasReadPrivacyNotice: formPersonal.value.leido,
+    allowsDataUse: formPersonal.value.uso_de_datos,
+    isPrerecorded: employee.isPrerecorded,
+    bankAccount: employee.bankAccount,
+    acceptedByName: employee.acceptedByName,
+    checkerId: employee.checkerId,
+  }
 
-    position: 'top-right',
-  })
+  guardando.value = true
+  try {
+    const updatedEmployee = await employeesApi.update(employee.id, payload)
+    authStore.employee = { ...employee, ...updatedEmployee, ...payload }
+    $q.notify({
+      type: 'positive',
+      icon: 'check_circle',
+      message: 'Información personal guardada correctamente.',
+      position: 'top-right',
+    })
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      icon: 'error',
+      message: error.message || 'No fue posible guardar la información personal.',
+      position: 'top-right',
+    })
+  } finally {
+    guardando.value = false
+  }
 }
 
 // ================================================================
@@ -1062,7 +1170,7 @@ const editarContacto = (contacto) => {
 // GUARDAR CONTACTO
 // ================================================================
 
-const guardarContacto = () => {
+const guardarContacto = async () => {
   if (!contactoValido.value) {
     $q.notify({
       type: 'negative',
@@ -1077,63 +1185,25 @@ const guardarContacto = () => {
     return
   }
 
-  if (contactoEditando.value) {
-    const index = contactos.value.findIndex((contacto) => contacto.id === contactoEditando.value)
-
-    if (index !== -1) {
-      contactos.value[index] = {
-        ...contactos.value[index],
-
-        ...formContacto.value,
-
-        nombre: formContacto.value.nombre.trim(),
-
-        apellido_Paterno: formContacto.value.apellido_Paterno.trim(),
-
-        apellido_Materno: formContacto.value.apellido_Materno.trim(),
-      }
+  try {
+    guardando.value = true
+    const employeeId = authStore.employee?.id
+    if (!employeeId) throw new Error('No se encontró el identificador del empleado.')
+    const payload = obtenerPayloadContacto()
+    if (contactoEditando.value) {
+      await employeeContactsApi.update(employeeId, contactoEditando.value, payload)
+    } else {
+      await employeeContactsApi.create(employeeId, payload)
     }
+    contactos.value = (await employeeContactsApi.list(employeeId)).map(mapearContacto)
 
-    $q.notify({
-      type: 'positive',
-
-      icon: 'check_circle',
-
-      message: 'Contacto actualizado correctamente.',
-
-      position: 'top-right',
-    })
-  } else {
-    contactos.value.push({
-      id: Date.now(),
-
-      nombre: formContacto.value.nombre.trim(),
-
-      apellido_Paterno: formContacto.value.apellido_Paterno.trim(),
-
-      apellido_Materno: formContacto.value.apellido_Materno.trim(),
-
-      parentesco: formContacto.value.parentesco,
-
-      telefono_Celular: formContacto.value.telefono_Celular,
-
-      telefono_Casa: formContacto.value.telefono_Casa,
-
-      telefono_Trabajo: formContacto.value.telefono_Trabajo,
-    })
-
-    $q.notify({
-      type: 'positive',
-
-      icon: 'check_circle',
-
-      message: 'Contacto agregado correctamente.',
-
-      position: 'top-right',
-    })
+    $q.notify({ type: 'positive', icon: 'check_circle', message: 'Contacto guardado correctamente.', position: 'top-right' })
+    cerrarDialogo()
+  } catch (error) {
+    $q.notify({ type: 'negative', icon: 'error', message: error.message || 'No fue posible guardar el contacto.', position: 'top-right' })
+  } finally {
+    guardando.value = false
   }
-
-  cerrarDialogo()
 }
 
 // ================================================================
@@ -1168,30 +1238,39 @@ const confirmarEliminar = (contacto) => {
   dialogEliminar.value = true
 }
 
-const eliminarContacto = () => {
+const eliminarContacto = async () => {
   if (!contactoEliminar.value) {
     return
   }
 
-  contactos.value = contactos.value.filter((contacto) => contacto.id !== contactoEliminar.value.id)
-
-  $q.notify({
-    type: 'positive',
-
-    icon: 'check_circle',
-
-    message: 'Contacto eliminado correctamente.',
-
-    position: 'top-right',
-  })
-
-  contactoEliminar.value = null
-
-  dialogEliminar.value = false
+  try {
+    guardando.value = true
+    const employeeId = authStore.employee?.id
+    if (!employeeId) throw new Error('No se encontró el identificador del empleado.')
+    await employeeContactsApi.remove(employeeId, contactoEliminar.value.id)
+    contactos.value = contactos.value.filter((contacto) => contacto.id !== contactoEliminar.value.id)
+    $q.notify({ type: 'positive', icon: 'check_circle', message: 'Contacto eliminado correctamente.', position: 'top-right' })
+  } catch (error) {
+    $q.notify({ type: 'negative', icon: 'error', message: error.message || 'No fue posible eliminar el contacto.', position: 'top-right' })
+  } finally {
+    guardando.value = false
+    contactoEliminar.value = null
+    dialogEliminar.value = false
+  }
 }
 </script>
 
 <style scoped>
+.save-loading-card {
+  display: flex;
+  min-width: min(320px, calc(100vw - 40px));
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px;
+  text-align: center;
+}
+
 /* ================================================================
    GENERAL
 ================================================================ */
