@@ -4,6 +4,8 @@ import { ref, computed } from 'vue'
 import { setItem, getItem, removeItem, setJson, getJson, storageKeys } from '../utils/storage'
 
 import { authApi } from '@/api/auth.api'
+import { usersApi } from '@/api/users.api'
+import { employeesApi } from '@/api/employees.api'
 import { useSystemsStore } from '@/stores/systems.store'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -11,6 +13,8 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref(getJson(storageKeys.authUser))
   const expiration = ref(getItem(storageKeys.authExpiration))
   const itsBirthday = ref(false)
+  const employee = ref(null)
+  let employeeRequest = null
 
   const expirationTimestamp = computed(() => obtenerTimestamp(expiration.value))
 
@@ -35,15 +39,50 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(credentials) {
     const response = await authApi.login(credentials)
 
+    if (response?.challengeId || response?.requiresTwoFactor || response?.twoFactorRequired) {
+      return response
+    }
+
     guardarSesion(response)
 
     return response
   }
 
+  async function loadEmployee() {
+    if (employee.value) return employee.value
+    if (employeeRequest) return employeeRequest
+
+    const userId = user.value?.id
+    if (!userId) throw new Error('La sesión no incluye el identificador del usuario.')
+
+    employeeRequest = (async () => {
+      const currentUser = await usersApi.getById(userId)
+      if (!currentUser.referenceId) throw new Error('El usuario no tiene un empleado asociado.')
+
+      employee.value = await employeesApi.getById(currentUser.referenceId)
+      return employee.value
+    })()
+
+    try {
+      return await employeeRequest
+    } finally {
+      employeeRequest = null
+    }
+  }
+
   async function loadBirthday(fechaNacimiento) {
+    const match = typeof fechaNacimiento === 'string'
+      ? fechaNacimiento.match(/^(\d{4})-(\d{2})-(\d{2})/)
+      : null
+
+    if (!match) {
+      itsBirthday.value = false
+      return
+    }
+
     const hoy = new Date()
-    const [, mes, dia] = fechaNacimiento.split('-').map(Number)
-    itsBirthday.value = (hoy.getMonth() + 1 === mes && hoy.getDate() === dia)
+    const [, , mes, dia] = match
+    itsBirthday.value = hoy.getMonth() + 1 === Number(mes) && hoy.getDate() === Number(dia)
   }
 
   function guardarSesion(session) {
@@ -53,6 +92,9 @@ export const useAuthStore = defineStore('auth', () => {
 
     token.value = session.token
     user.value = session.user ?? null
+    employee.value = null
+    employeeRequest = null
+    itsBirthday.value = false
     expiration.value = session.expiration
 
     setItem(storageKeys.authToken, session.token)
@@ -63,6 +105,9 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     token.value = null
     user.value = null
+    employee.value = null
+    employeeRequest = null
+    itsBirthday.value = false
     expiration.value = null
 
     removeItem(storageKeys.authToken)
@@ -75,6 +120,7 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     token,
     user,
+    employee,
     expiration,
     isAuthenticated,
     isSessionExpired,
@@ -83,7 +129,8 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     guardarSesion,
     logout,
-    loadBirthday
+    loadBirthday,
+    loadEmployee,
   }
 })
 

@@ -19,7 +19,7 @@
           <!-- Avatar -->
           <div class="profile-avatar-wrapper">
             <q-avatar size="110px" class="profile-avatar">
-              <img src="../assets/perfil_Hombre.png" />
+              <img :src="empleado.photoUrl || fotoPerfilPredeterminada" alt="Foto de perfil" />
             </q-avatar>
 
             <div class="profile-status-dot"></div>
@@ -41,17 +41,17 @@
             </div>
 
             <div class="profile-status">
-              <q-icon name="check_circle" />
-              Cuenta activa
+              <q-icon :name="empleado.isActive ? 'check_circle' : 'cancel'" />
+              {{ empleado.isActive ? 'Cuenta activa' : 'Cuenta inactiva' }}
             </div>
           </div>
 
-          <!-- Identificador -->
+          <!-- Usuario -->
           <div class="profile-id">
-            <div class="profile-id-label">Identificador</div>
+            <div class="profile-id-label">Usuario</div>
 
             <div class="profile-id-value">
-              {{ empleado.id }}
+              {{ authStore.user?.userName || authStore.user?.username || '—' }}
             </div>
           </div>
         </div>
@@ -306,7 +306,9 @@
               <div>
                 <div class="information-label">Estado laboral</div>
 
-                <div class="information-value status-text">Activo</div>
+                <div class="information-value status-text">
+                  {{ empleado.isActive ? 'Activo' : 'Inactivo' }}
+                </div>
               </div>
             </div>
           </div>
@@ -437,7 +439,7 @@
               :label="twofa ? 'Deshabilitar' : 'Habilitar'"
               :icon="twofa ? 'lock_open' : 'lock'"
               :class="twofa ? 'disable-security-btn' : 'profile-action-btn'"
-              @click="toggleTwofa"
+              @click="abrirDialogoTwofa"
             />
           </div>
 
@@ -482,6 +484,79 @@
         </div>
       </q-card>
     </div>
+
+    <q-dialog v-model="dialogTwofa" persistent>
+      <q-card class="password-dialog">
+        <div class="dialog-header">
+          <div class="dialog-header-icon">
+            <q-icon :name="twofa ? 'lock_open' : 'verified_user'" />
+          </div>
+
+          <div>
+            <div class="dialog-title">
+              {{ twofa ? 'Deshabilitar autenticación' : twofaCodeSent ? 'Confirmar código' : 'Habilitar autenticación' }}
+            </div>
+            <div class="dialog-subtitle">
+              {{
+                twofaCodeSent
+                  ? 'Ingresa el código que enviamos a tu correo.'
+                  : twofa
+                    ? 'Confirma tu contraseña para deshabilitarla.'
+                    : 'Confirma tu contraseña. Te enviaremos un código a tu correo.'
+              }}
+            </div>
+          </div>
+
+          <q-space />
+          <q-btn flat round dense icon="close" aria-label="Cerrar" @click="dialogTwofa = false" />
+        </div>
+
+        <q-separator />
+
+        <q-card-section class="q-pa-lg">
+          <q-input
+            v-if="twofa || !twofaCodeSent"
+            v-model="twofaCurrentPassword"
+            outlined
+            dense
+            autofocus
+            type="password"
+            label="Contraseña actual"
+            autocomplete="current-password"
+            class="dialog-input"
+          />
+          <q-input
+            v-if="twofaCodeSent"
+            v-model="twofaCode"
+            outlined
+            dense
+            autofocus
+            label="Código de verificación"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            class="dialog-input"
+          />
+        </q-card-section>
+
+        <q-separator />
+
+        <q-card-actions class="dialog-actions">
+          <q-btn flat no-caps label="Cancelar" @click="dialogTwofa = false" />
+          <q-btn
+            unelevated
+            no-caps
+            color="primary"
+            :label="twofa ? 'Deshabilitar' : twofaCodeSent ? 'Confirmar código' : 'Enviar código'"
+            :disable="
+              isUpdatingTwofa ||
+              (twofa ? !twofaCurrentPassword : twofaCodeSent ? !twofaCode.trim() : !twofaCurrentPassword)
+            "
+            :loading="isUpdatingTwofa"
+            @click="procesarCambioTwofa"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
 
     <!-- =========================================================
          DIALOG CAMBIAR CONTRASEÑA
@@ -616,6 +691,7 @@
             label="Actualizar contraseña"
             icon="check"
             :disable="!passwordValid"
+            :loading="isChangingPassword"
             @click="actualizarPassword"
           />
         </q-card-actions>
@@ -625,40 +701,85 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth.store'
+import { usersApi } from '@/api/users.api'
+import { twoFactorApi } from '@/api/two-factor.api'
+import fotoPerfilPredeterminada from '@/assets/perfil_Hombre.png'
 
 const $q = useQuasar()
+const router = useRouter()
+const authStore = useAuthStore()
 
 // ================================================================
-// DATOS LOCALES DE PRUEBA
+// DATOS DEL EMPLEADO
 // ================================================================
 
 const empleado = ref({
-  id: 'IEEN-2026-001',
-
-  nombre: 'Francisco Manuel Gutiérrez Iñiguez',
-
-  puesto: 'Programador',
-
-  area: 'Unidad de Tecnologías de la Información',
-
-  tratamiento: 'Lic.',
-
-  curp: 'GUEF950101HNTXXX01',
-
-  rfc: 'GUEF950101XXX',
-
-  telefono: '311 123 4567',
-
-  email: 'francisco@ieen.org.mx',
-
-  domicilio: 'Tepic, Nayarit',
-
-  antiguedad: '9 años',
-
-  ultimoCambioPassword: '15 de agosto de 2026',
+  id: '—',
+  nombre: '—',
+  puesto: '—',
+  area: '—',
+  tratamiento: '—',
+  curp: '—',
+  rfc: '—',
+  telefono: '—',
+  email: '—',
+  domicilio: '—',
+  antiguedad: '—',
+  ultimoCambioPassword: '—',
+  photoUrl: null,
+  isActive: false,
 })
+
+async function cargarEmpleado() {
+  try {
+    const data = await authStore.loadEmployee()
+    empleado.value = {
+      ...empleado.value,
+      id: data.id || '—',
+      nombre:
+        data.fullName ||
+        [data.name, data.paternalSurname, data.maternalSurname].filter(Boolean).join(' ') ||
+        '—',
+      puesto: data.positionName || '—',
+      area: data.areaName || '—',
+      tratamiento: data.treatmentAbbreviation || '—',
+      curp: data.curp || '—',
+      rfc: data.rfc || '—',
+      telefono: data.phone || '—',
+      email: data.email || '—',
+      domicilio: data.address || '—',
+      photoUrl: data.photoUrl || null,
+      isActive: Boolean(data.isActive),
+    }
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error.message || 'No fue posible cargar la información del empleado.',
+      position: 'top-right',
+    })
+  }
+}
+
+onMounted(cargarEmpleado)
+
+async function cargarEstadoDosFactores() {
+  const userId = authStore.user?.id
+  if (!userId) return
+
+  try {
+    const currentUser = await usersApi.getById(userId)
+    const enabled = currentUser.twoFactorEnabled ?? currentUser.isTwoFactorEnabled
+    if (enabled !== undefined && enabled !== null) twofa.value = Boolean(enabled)
+  } catch {
+    // Se conserva el estado disponible en la sesión si el servicio no devuelve el usuario.
+  }
+}
+
+onMounted(cargarEstadoDosFactores)
 
 // ================================================================
 // TABS
@@ -700,7 +821,14 @@ const activeTab = ref('personal')
 // SEGURIDAD
 // ================================================================
 
-const twofa = ref(true)
+const twofa = ref(
+  Boolean(authStore.user?.twoFactorEnabled ?? authStore.user?.isTwoFactorEnabled ?? false),
+)
+const dialogTwofa = ref(false)
+const twofaCurrentPassword = ref('')
+const twofaCode = ref('')
+const twofaCodeSent = ref(false)
+const isUpdatingTwofa = ref(false)
 
 // ================================================================
 // PASSWORD
@@ -711,6 +839,7 @@ const dialogPassword = ref(false)
 const passwordActual = ref('')
 const passwordNueva = ref('')
 const passwordConfirmacion = ref('')
+const isChangingPassword = ref(false)
 
 const showActual = ref(false)
 const showNueva = ref(false)
@@ -759,31 +888,110 @@ const abrirCambioPassword = () => {
   dialogPassword.value = true
 }
 
-const actualizarPassword = () => {
-  $q.notify({
-    type: 'positive',
-    icon: 'check_circle',
-    message: 'Contraseña actualizada correctamente.',
-    position: 'top-right',
+const actualizarPassword = async () => {
+  if (!passwordValid.value || isChangingPassword.value) return
+
+  isChangingPassword.value = true
+  $q.loading.show({
+    message: 'Actualizando contraseña...',
+    boxClass: 'bg-grey-2 text-grey-9',
+    spinnerColor: 'primary',
   })
 
-  dialogPassword.value = false
+  try {
+    await usersApi.changePassword({
+      currentPassword: passwordActual.value,
+      newPassword: passwordNueva.value,
+      confirmPassword: passwordConfirmacion.value,
+    })
+
+    $q.loading.show({
+      message: 'Contraseña actualizada. Se cerrará tu sesión...',
+      boxClass: 'bg-grey-2 text-grey-9',
+      spinnerColor: 'primary',
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 1800))
+    authStore.logout()
+    await router.replace({ name: 'login' })
+  } catch (error) {
+    $q.loading.hide()
+    $q.notify({
+      type: 'negative',
+      message:
+        error.response?.data?.message || error.message || 'No fue posible cambiar la contraseña.',
+      position: 'top-right',
+    })
+  } finally {
+    $q.loading.hide()
+    isChangingPassword.value = false
+  }
 }
 
-const toggleTwofa = () => {
-  twofa.value = !twofa.value
+function abrirDialogoTwofa() {
+  twofaCurrentPassword.value = ''
+  twofaCode.value = ''
+  twofaCodeSent.value = false
+  dialogTwofa.value = true
+}
 
-  $q.notify({
-    type: twofa.value ? 'positive' : 'warning',
+async function procesarCambioTwofa() {
+  if (isUpdatingTwofa.value) return
 
-    icon: twofa.value ? 'verified_user' : 'security',
-
+  isUpdatingTwofa.value = true
+  $q.loading.show({
     message: twofa.value
-      ? 'Autenticación en dos pasos habilitada.'
-      : 'Autenticación en dos pasos deshabilitada.',
-
-    position: 'top-right',
+      ? 'Deshabilitando autenticación en dos pasos...'
+      : twofaCodeSent.value
+        ? 'Verificando código...'
+        : 'Enviando código de verificación...',
+    boxClass: 'bg-grey-2 text-grey-9',
+    spinnerColor: 'primary',
   })
+
+  try {
+    if (twofa.value) {
+      await twoFactorApi.disable(twofaCurrentPassword.value)
+      twofa.value = false
+      twofaCurrentPassword.value = ''
+      dialogTwofa.value = false
+      $q.notify({
+        type: 'positive',
+        message: 'Autenticación en dos pasos deshabilitada.',
+        position: 'top-right',
+      })
+    } else if (!twofaCodeSent.value) {
+      await twoFactorApi.enable(twofaCurrentPassword.value, 'Email')
+      twofaCodeSent.value = true
+      twofaCurrentPassword.value = ''
+      $q.notify({
+        type: 'positive',
+        message: 'Enviamos un código de verificación a tu correo.',
+        position: 'top-right',
+      })
+    } else {
+      await twoFactorApi.confirm(twofaCode.value.trim())
+      twofa.value = true
+      dialogTwofa.value = false
+      $q.notify({
+        type: 'positive',
+        message: 'Autenticación en dos pasos habilitada.',
+        position: 'top-right',
+      })
+    }
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message:
+        error.response?.data?.message ||
+        error.message ||
+        'No fue posible actualizar la autenticación en dos pasos.',
+      position: 'top-right',
+    })
+  } finally {
+    $q.loading.hide()
+    isUpdatingTwofa.value = false
+  }
 }
 </script>
 

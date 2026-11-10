@@ -96,15 +96,23 @@
           <div class="login-heading">
             <div class="login-overline">Bienvenido</div>
 
-            <h1 class="login-title">Iniciar sesión</h1>
+            <h1 class="login-title">
+              {{ awaitingTwoFactor ? 'Verificación en dos pasos' : 'Iniciar sesión' }}
+            </h1>
 
-            <p class="login-subtitle">Ingresa tus credenciales para acceder al Universo IEEN.</p>
+            <p class="login-subtitle">
+              {{
+                awaitingTwoFactor
+                  ? 'Ingresa el código de seguridad que recibiste.'
+                  : 'Ingresa tus credenciales para acceder al Universo IEEN.'
+              }}
+            </p>
           </div>
 
           <q-form class="login-form" @submit.prevent="onSubmit">
             <!-- Usuario -->
 
-            <div class="input-group">
+            <div v-if="!awaitingTwoFactor" class="input-group">
               <label class="input-label"> Usuario </label>
 
               <q-input
@@ -124,7 +132,7 @@
 
             <!-- Contraseña -->
 
-            <div class="input-group">
+            <div v-if="!awaitingTwoFactor" class="input-group">
               <div class="input-label-row">
                 <label class="input-label"> Contraseña </label>
               </div>
@@ -157,6 +165,25 @@
               </q-input>
             </div>
 
+            <div v-if="awaitingTwoFactor" class="input-group">
+              <label class="input-label" for="two-factor-code">Código de seguridad</label>
+              <q-input
+                id="two-factor-code"
+                v-model="verificationCode"
+                outlined
+                class="login-input"
+                placeholder="Ingresa el código recibido"
+                autocomplete="one-time-code"
+                :rules="[(value) => !!value || 'El código es requerido.']"
+                lazy-rules
+                autofocus
+              >
+                <template #prepend>
+                  <q-icon name="verified_user" class="input-icon" />
+                </template>
+              </q-input>
+            </div>
+
             <!-- Botón -->
 
             <q-btn
@@ -164,13 +191,23 @@
               unelevated
               no-caps
               class="login-submit"
-              label="Iniciar sesión"
+              :label="awaitingTwoFactor ? 'Verificar código' : 'Iniciar sesión'"
               :loading="loading"
             >
               <template #loading>
-                <q-spinner-dots size="24px" />
+                <q-spinner-dots size="24px" class="login-button-spinner" />
               </template>
             </q-btn>
+
+            <q-btn
+              v-if="awaitingTwoFactor"
+              flat
+              no-caps
+              class="login-submit"
+              label="Volver a las credenciales"
+              :disable="loading"
+              @click="volverACredenciales"
+            />
 
             <!-- Mensaje -->
 
@@ -218,7 +255,13 @@
 
           <div class="loading-title">Iniciando sesión</div>
 
-          <div class="loading-text">Validando tus credenciales...</div>
+          <div class="loading-text">
+            {{
+              awaitingTwoFactor
+                ? 'Validando el código de seguridad...'
+                : 'Validando tus credenciales...'
+            }}
+          </div>
         </div>
       </div>
     </transition>
@@ -231,6 +274,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 
 import { useAuthStore } from '../stores/auth.store'
+import { authApi } from '../api/auth.api'
 import { getSafeRedirect } from '../router/guards'
 
 import ieenLogo from '../assets/ieen-logo.png'
@@ -245,8 +289,8 @@ import febrero from '../assets/login/febrero.png'
 // import agosto from '../assets/login/agosto.png'
 import septiembre from '../assets/login/septiembre.png'
 import octubre from '../assets/login/octubre.png'
-// import noviembre from '../assets/login/noviembre.png'
-// import diciembre from '../assets/login/diciembre.png'
+import noviembre from '../assets/login/noviembre.png'
+import diciembre from '../assets/login/diciembre.png'
 
 const router = useRouter()
 const route = useRoute()
@@ -274,8 +318,8 @@ const imagenesMes = {
   // 8: agosto,
   9: septiembre,
   10: octubre,
-  // 11: noviembre,
-  // 12: diciembre
+  11: noviembre,
+  12: diciembre,
 }
 
 const imagenMesActual = computed(() => {
@@ -286,6 +330,9 @@ const imagenMesActual = computed(() => {
 const showPassword = ref(false)
 
 const loading = ref(false)
+const awaitingTwoFactor = ref(false)
+const challengeId = ref('')
+const verificationCode = ref('')
 
 // =====================================================
 // TEMA
@@ -321,10 +368,29 @@ async function onSubmit() {
   loading.value = true
 
   try {
-    await authStore.login({
-      userName: form.value.userName,
-      password: form.value.password,
-    })
+    if (awaitingTwoFactor.value) {
+      const session = await authApi.completeTwoFactorLogin({
+        challengeId: challengeId.value,
+        code: verificationCode.value.trim(),
+      })
+      authStore.guardarSesion(session)
+    } else {
+      const result = await authStore.login({
+        userName: form.value.userName,
+        password: form.value.password,
+      })
+
+      if (result?.challengeId || result?.requiresTwoFactor || result?.twoFactorRequired) {
+        if (!result.challengeId) {
+          throw new Error('El inicio de sesión no devolvió el identificador del reto de seguridad.')
+        }
+
+        challengeId.value = result.challengeId
+        verificationCode.value = ''
+        awaitingTwoFactor.value = true
+        return
+      }
+    }
 
     $q.notify({
       type: 'positive',
@@ -352,6 +418,12 @@ async function onSubmit() {
   } finally {
     loading.value = false
   }
+}
+
+function volverACredenciales() {
+  awaitingTwoFactor.value = false
+  challengeId.value = ''
+  verificationCode.value = ''
 }
 </script>
 
@@ -883,7 +955,14 @@ async function onSubmit() {
 }
 
 .loading-spinner {
+  display: block;
+  margin: 0 auto;
   color: #a72f70;
+}
+
+.login-button-spinner {
+  display: block;
+  margin: 0 auto;
 }
 
 .loading-title {

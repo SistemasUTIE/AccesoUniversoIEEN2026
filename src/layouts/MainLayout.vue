@@ -167,9 +167,10 @@ function confirmLogout() {
 
 onMounted(async () => {
   try {
-    await authStore.loadBirthday('2026-09-19')
+    const employee = await authStore.loadEmployee()
+    await authStore.loadBirthday(employee.birthDate)
   } catch (error) {
-    console.error(error)
+    console.error('No fue posible cargar la información del empleado:', error)
   }
 })
 </script>
