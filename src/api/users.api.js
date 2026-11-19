@@ -22,4 +22,26 @@ export const usersApi = {
 
     return result.data
   },
+
+  async sendEmailConfirmation() {
+    const response = await api.post('/Users/email/send-confirmation')
+    const result = response.data
+
+    if (result?.success === false) {
+      throw new Error(result.message || 'No fue posible confirmar el correo.')
+    }
+
+    return result?.data ?? result
+  },
+
+  async confirmEmail(token) {
+    const response = await api.post('/Users/email/confirm', { token })
+    const result = response.data
+
+    if (result?.success === false) {
+      throw new Error(result.message || 'No fue posible confirmar el correo.')
+    }
+
+    return result?.data ?? result
+  },
 }

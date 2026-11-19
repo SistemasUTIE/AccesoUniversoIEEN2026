@@ -109,7 +109,7 @@
             </p>
           </div>
 
-          <q-form class="login-form" @submit.prevent="onSubmit">
+          <q-form v-if="!awaitingTwoFactor" class="login-form" @submit.prevent="onSubmit">
             <!-- Usuario -->
 
             <div v-if="!awaitingTwoFactor" class="input-group">
@@ -265,6 +265,37 @@
         </div>
       </div>
     </transition>
+
+    <q-dialog v-model="awaitingTwoFactor" persistent>
+      <q-card class="two-factor-dialog">
+        <q-card-section>
+          <div class="text-h6">Autenticación en dos factores</div>
+          <div class="q-mt-sm">Tu cuenta tiene activada la autenticacion por dos factores. Revisa tu correo e ingresa el codigo de seis caracteres.</div>
+          <div class="two-factor-code-inputs q-mt-md" role="group" aria-label="Codigo de autenticacion de seis caracteres">
+            <q-input
+              v-for="(_, index) in verificationDigits"
+              :key="index"
+              :ref="(element) => (twoFactorInputs[index] = element)"
+              :model-value="verificationDigits[index]"
+              outlined
+              dense
+              maxlength="1"
+              autofocus
+              autocomplete="one-time-code"
+              class="two-factor-digit-input"
+              :aria-label="`Caracter ${index + 1} del codigo`"
+              @update:model-value="setTwoFactorDigit(index, $event)"
+              @keydown="handleTwoFactorKeydown($event, index)"
+              @paste.prevent="pasteTwoFactorCode($event, index)"
+            />
+          </div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps label="Volver" :disable="loading" @click="volverACredenciales" />
+          <q-btn unelevated no-caps color="primary" label="Verificar código" :loading="loading" :disable="verificationCode.length !== 6" @click="onSubmit" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
@@ -333,6 +364,9 @@ const loading = ref(false)
 const awaitingTwoFactor = ref(false)
 const challengeId = ref('')
 const verificationCode = ref('')
+const verificationDigits = ref(Array(6).fill(''))
+const twoFactorInputs = ref([])
+const pendingLoginData = ref(null)
 
 // =====================================================
 // TEMA
@@ -369,35 +403,66 @@ async function onSubmit() {
 
   try {
     if (awaitingTwoFactor.value) {
-      const session = await authApi.completeTwoFactorLogin({
+      if (verificationCode.value.length !== 6) return
+
+      const verifiedSession = await authApi.completeTwoFactorLogin({
         challengeId: challengeId.value,
         code: verificationCode.value.trim(),
       })
+      console.log('Respuesta de POST /Auth/two-factor:', verifiedSession)
+
+      const sessionUser = verifiedSession?.user
+        ? { ...pendingLoginData.value?.user, ...verifiedSession.user }
+        : pendingLoginData.value?.user
+      const session = {
+        ...verifiedSession,
+        expiration: verifiedSession?.expiration ?? pendingLoginData.value?.expiration,
+        user: sessionUser ?? null,
+      }
+
       authStore.guardarSesion(session)
+      pendingLoginData.value = null
     } else {
       const result = await authStore.login({
         userName: form.value.userName,
         password: form.value.password,
       })
+      console.log('Respuesta de POST /Auth/login:', result)
 
-      if (result?.challengeId || result?.requiresTwoFactor || result?.twoFactorRequired) {
+      if (result?.requiresTwoFactor === true) {
         if (!result.challengeId) {
           throw new Error('El inicio de sesión no devolvió el identificador del reto de seguridad.')
         }
 
         challengeId.value = result.challengeId
+        pendingLoginData.value = result
         verificationCode.value = ''
+        verificationDigits.value = Array(6).fill('')
         awaitingTwoFactor.value = true
         return
       }
+
     }
 
-    $q.notify({
-      type: 'positive',
-      message: 'Inicio de sesión correcto.',
-      icon: 'check_circle',
-      position: 'top-right',
-    })
+    const emailNeedsConfirmation = authStore.user?.emailConfirmed === false
+    if (emailNeedsConfirmation) {
+      $q.notify({
+        type: 'warning',
+        message: 'Tu correo esta pendiente de verificacion. Revisa tu correo y confirma tu cuenta desde Mi perfil.',
+        icon: 'mark_email_unread',
+        position: 'top-right',
+        timeout: 8000,
+      })
+    }
+
+    if (!emailNeedsConfirmation) {
+      $q.notify({
+        type: 'positive',
+        message: 'Inicio de sesion correcto.',
+        icon: 'check_circle',
+        position: 'top-right',
+      })
+    }
 
     router.replace(getSafeRedirect(route.query.redirect) || { name: 'home' })
   } catch (error) {
@@ -424,10 +489,87 @@ function volverACredenciales() {
   awaitingTwoFactor.value = false
   challengeId.value = ''
   verificationCode.value = ''
+  verificationDigits.value = Array(6).fill('')
+  pendingLoginData.value = null
+}
+
+function focusTwoFactorInput(index) {
+  const input = twoFactorInputs.value[index]?.$el?.querySelector('input')
+  input?.focus()
+  input?.select()
+}
+
+function setTwoFactorDigit(index, value) {
+  const character = String(value ?? '').slice(-1)
+  verificationDigits.value[index] = character
+  verificationCode.value = verificationDigits.value.join('')
+
+  if (character && index < verificationDigits.value.length - 1) {
+    focusTwoFactorInput(index + 1)
+  }
+}
+
+function handleTwoFactorKeydown(event, index) {
+  if (event.key === 'Backspace' && !verificationDigits.value[index] && index > 0) {
+    focusTwoFactorInput(index - 1)
+  } else if (event.key === 'ArrowLeft' && index > 0) {
+    event.preventDefault()
+    focusTwoFactorInput(index - 1)
+  } else if (event.key === 'ArrowRight' && index < verificationDigits.value.length - 1) {
+    event.preventDefault()
+    focusTwoFactorInput(index + 1)
+  }
+}
+
+function pasteTwoFactorCode(event, startIndex) {
+  const pastedCode = event.clipboardData?.getData('text')?.trim()
+  if (!pastedCode) return
+
+  const characters = pastedCode.slice(0, verificationDigits.value.length - startIndex).split('')
+  characters.forEach((character, offset) => {
+    verificationDigits.value[startIndex + offset] = character
+  })
+  verificationCode.value = verificationDigits.value.join('')
+
+  const nextIndex = Math.min(startIndex + characters.length, verificationDigits.value.length - 1)
+  focusTwoFactorInput(nextIndex)
 }
 </script>
 
 <style scoped>
+.two-factor-dialog {
+  width: 460px;
+  max-width: 92vw;
+  border-radius: 14px;
+}
+
+.two-factor-code-inputs {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.two-factor-digit-input {
+  width: 52px;
+  text-align: center;
+}
+
+.two-factor-digit-input :deep(input) {
+  text-align: center;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+@media (max-width: 480px) {
+  .two-factor-code-inputs {
+    gap: 6px;
+  }
+
+  .two-factor-digit-input {
+    width: 43px;
+  }
+}
+
 .panel-institucional {
   position: absolute;
   inset: 0;

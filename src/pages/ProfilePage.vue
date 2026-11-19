@@ -110,6 +110,32 @@
 
           <q-separator />
 
+          <div v-if="!emailConfirmed" class="action-panel email-confirmation-panel">
+            <div class="action-panel-icon">
+              <q-icon name="mark_email_unread" />
+            </div>
+            <div class="action-panel-content">
+              <div class="action-panel-title">Verificar correo</div>
+              <div class="action-panel-description">
+                Solicita el envio del correo de confirmacion para verificar tu direccion.
+              </div>
+            </div>
+            <q-btn
+              unelevated
+              no-caps
+              label="Verificar correo"
+              icon="verified"
+              class="profile-action-btn"
+              :loading="isConfirmingEmail"
+              :disable="isConfirmingEmail"
+              @click="enviarConfirmacionCorreo"
+            />
+          </div>
+
+          <div v-else class="email-confirmed-status">
+            <q-icon name="mark_email_read" /> Correo verificado
+          </div>
+
           <div class="information-grid">
             <div class="information-item">
               <div class="information-icon">
@@ -558,6 +584,43 @@
       </q-card>
     </q-dialog>
 
+    <q-dialog v-model="dialogEmailConfirmation" persistent>
+      <q-card class="password-dialog">
+        <div class="dialog-header">
+          <div class="dialog-header-icon"><q-icon name="mark_email_read" /></div>
+          <div>
+            <div class="dialog-title">Verificar correo</div>
+            <div class="dialog-subtitle">Ingresa el token que enviamos a tu correo registrado</div>
+          </div>
+          <q-space />
+          <q-btn flat round dense icon="close" aria-label="Cerrar verificacion de correo" :disable="isConfirmingEmail" @click="dialogEmailConfirmation = false" />
+        </div>
+        <q-separator />
+        <q-card-section>
+          <q-input
+            v-model="emailConfirmationToken"
+            outlined
+            autofocus
+            label="Token"
+            autocomplete="one-time-code"
+            @keyup.enter="confirmarCorreo"
+          />
+        </q-card-section>
+        <q-card-actions align="right" class="dialog-actions">
+          <q-btn flat no-caps label="Cancelar" :disable="isConfirmingEmail" @click="dialogEmailConfirmation = false" />
+          <q-btn
+            unelevated
+            no-caps
+            color="primary"
+            label="Confirmar correo"
+            :loading="isConfirmingEmail"
+            :disable="!emailConfirmationToken.trim() || isConfirmingEmail"
+            @click="confirmarCorreo"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- =========================================================
          DIALOG CAMBIAR CONTRASEÑA
     ========================================================== -->
@@ -712,6 +775,10 @@ import fotoPerfilPredeterminada from '@/assets/perfil_Hombre.png'
 const $q = useQuasar()
 const router = useRouter()
 const authStore = useAuthStore()
+const emailConfirmed = ref(authStore.user?.emailConfirmed === true)
+const isConfirmingEmail = ref(false)
+const dialogEmailConfirmation = ref(false)
+const emailConfirmationToken = ref('')
 
 // ================================================================
 // DATOS DEL EMPLEADO
@@ -772,10 +839,83 @@ async function cargarEstadoDosFactores() {
 
   try {
     const currentUser = await usersApi.getById(userId)
+    emailConfirmed.value = currentUser.emailConfirmed === true
     const enabled = currentUser.twoFactorEnabled ?? currentUser.isTwoFactorEnabled
     if (enabled !== undefined && enabled !== null) twofa.value = Boolean(enabled)
   } catch {
     // Se conserva el estado disponible en la sesión si el servicio no devuelve el usuario.
+  }
+}
+
+async function enviarConfirmacionCorreo() {
+  if (isConfirmingEmail.value || emailConfirmed.value) return
+  isConfirmingEmail.value = true
+  $q.loading.show({
+    message: 'Enviando correo de confirmacion...',
+    boxClass: 'bg-grey-2 text-grey-9',
+    spinnerColor: 'primary',
+  })
+
+  try {
+    await usersApi.sendEmailConfirmation()
+    emailConfirmationToken.value = ''
+    dialogEmailConfirmation.value = true
+    $q.notify({
+      type: 'positive',
+      message: 'Enviamos el token. Revisa tu correo registrado.',
+      position: 'top-right',
+    })
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error.response?.data?.message || error.message || 'No fue posible confirmar el correo.',
+      position: 'top-right',
+    })
+  } finally {
+    $q.loading.hide()
+    isConfirmingEmail.value = false
+  }
+}
+
+async function confirmarCorreo() {
+  const token = emailConfirmationToken.value.trim()
+  if (isConfirmingEmail.value || !token) return
+
+  isConfirmingEmail.value = true
+  $q.loading.show({
+    message: 'Verificando el token de correo...',
+    boxClass: 'bg-grey-2 text-grey-9',
+    spinnerColor: 'primary',
+  })
+
+  try {
+    await usersApi.confirmEmail(token)
+    const currentUser = await usersApi.getById(authStore.user?.id)
+    if (currentUser.emailConfirmed !== true) {
+      throw new Error('El servicio aun no reporta el correo como verificado. Intenta nuevamente.')
+    }
+
+    emailConfirmed.value = true
+    if (authStore.user) {
+      authStore.guardarSesion({
+        token: authStore.token,
+        expiration: authStore.expiration,
+        user: { ...authStore.user, ...currentUser, emailConfirmed: true },
+      })
+    }
+
+    dialogEmailConfirmation.value = false
+    emailConfirmationToken.value = ''
+    $q.notify({ type: 'positive', message: 'Correo verificado correctamente.', position: 'top-right' })
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error.response?.data?.message || error.message || 'No fue posible verificar el correo.',
+      position: 'top-right',
+    })
+  } finally {
+    $q.loading.hide()
+    isConfirmingEmail.value = false
   }
 }
 
