@@ -2,9 +2,9 @@ import { boot } from 'quasar/wrappers'
 import axios from 'axios'
 import { useAuthStore } from '@/stores/auth.store'
 
-const api = axios.create({
-  baseURL: 'http://sistema.ieenayarit.org:9884/api',
-})
+export const API_BASE_URL = import.meta.env.QCLI_API_BASE_URL || 'http://sistema.ieenayarit.org:9884/api'
+
+const api = axios.create({ baseURL: API_BASE_URL })
 
 let redirectingForExpiredSession = false
 

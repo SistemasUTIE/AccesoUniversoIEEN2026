@@ -270,8 +270,8 @@
       <q-card class="two-factor-dialog">
         <q-card-section>
           <div class="text-h6">Autenticación en dos factores</div>
-          <div class="q-mt-sm">Tu cuenta tiene activada la autenticacion por dos factores. Revisa tu correo e ingresa el codigo de seis caracteres.</div>
-          <div class="two-factor-code-inputs q-mt-md" role="group" aria-label="Codigo de autenticacion de seis caracteres">
+          <div class="q-mt-sm">{{ challengeMethod === 'Authenticator' ? 'Escribe el código de seis dígitos que muestra tu aplicación Authenticator.' : 'Te enviamos un código de seis dígitos a tu correo.' }}</div>
+          <div v-if="!usingRecoveryCode" class="two-factor-code-inputs q-mt-md" role="group" aria-label="Código de autenticación de seis dígitos">
             <q-input
               v-for="(_, index) in verificationDigits"
               :key="index"
@@ -280,6 +280,7 @@
               outlined
               dense
               maxlength="1"
+              inputmode="numeric"
               autofocus
               autocomplete="one-time-code"
               class="two-factor-digit-input"
@@ -289,10 +290,22 @@
               @paste.prevent="pasteTwoFactorCode($event, index)"
             />
           </div>
+          <q-input
+            v-else
+            v-model="verificationCode"
+            outlined
+            dense
+            autofocus
+            class="q-mt-md"
+            label="Código de recuperación"
+            autocomplete="off"
+            aria-label="Código de recuperación"
+          />
+          <q-btn flat dense no-caps color="primary" class="q-mt-sm" :label="usingRecoveryCode ? 'Usar código de autenticación' : 'Usar un código de recuperación'" @click="toggleRecoveryCode" />
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat no-caps label="Volver" :disable="loading" @click="volverACredenciales" />
-          <q-btn unelevated no-caps color="primary" label="Verificar código" :loading="loading" :disable="verificationCode.length !== 6" @click="onSubmit" />
+          <q-btn unelevated no-caps color="primary" :label="usingRecoveryCode ? 'Verificar código de recuperación' : 'Verificar código'" :loading="loading" :disable="usingRecoveryCode ? verificationCode.trim().length < 5 : !/^\d{6}$/.test(verificationCode)" @click="onSubmit" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -363,6 +376,8 @@ const showPassword = ref(false)
 const loading = ref(false)
 const awaitingTwoFactor = ref(false)
 const challengeId = ref('')
+const challengeMethod = ref('Email')
+const usingRecoveryCode = ref(false)
 const verificationCode = ref('')
 const verificationDigits = ref(Array(6).fill(''))
 const twoFactorInputs = ref([])
@@ -403,14 +418,12 @@ async function onSubmit() {
 
   try {
     if (awaitingTwoFactor.value) {
-      if (verificationCode.value.length !== 6) return
+      if (usingRecoveryCode.value ? verificationCode.value.trim().length < 5 : !/^\d{6}$/.test(verificationCode.value)) return
 
       const verifiedSession = await authApi.completeTwoFactorLogin({
         challengeId: challengeId.value,
         code: verificationCode.value.trim(),
       })
-      console.log('Respuesta de POST /Auth/two-factor:', verifiedSession)
-
       const sessionUser = verifiedSession?.user
         ? { ...pendingLoginData.value?.user, ...verifiedSession.user }
         : pendingLoginData.value?.user
@@ -427,14 +440,14 @@ async function onSubmit() {
         userName: form.value.userName,
         password: form.value.password,
       })
-      console.log('Respuesta de POST /Auth/login:', result)
-
       if (result?.requiresTwoFactor === true) {
         if (!result.challengeId) {
           throw new Error('El inicio de sesión no devolvió el identificador del reto de seguridad.')
         }
 
         challengeId.value = result.challengeId
+        challengeMethod.value = result.twoFactorMethod || 'Email'
+        usingRecoveryCode.value = false
         pendingLoginData.value = result
         verificationCode.value = ''
         verificationDigits.value = Array(6).fill('')
@@ -468,11 +481,14 @@ async function onSubmit() {
   } catch (error) {
     console.error('Error al iniciar sesión:', error)
 
-    const message =
-      error.response?.data?.message ||
-      error.response?.data?.title ||
-      error.message ||
-      'No fue posible iniciar sesión.'
+    const serverMessage =
+      error.response?.data?.message || error.response?.data?.title || error.message || 'No fue posible iniciar sesión.'
+    const message = error.response?.status === 429
+      ? 'Demasiados intentos, espera un momento.'
+      : serverMessage
+    const challengeExpired =
+      /límite de intentos|intento de verificación no existe o expiró|código de verificación expiró|intento de verificación ya fue utilizado|método de doble factor cambió|correo del usuario cambió/i.test(serverMessage)
+    if (awaitingTwoFactor.value && challengeExpired) volverACredenciales()
 
     $q.notify({
       type: 'negative',
@@ -488,9 +504,17 @@ async function onSubmit() {
 function volverACredenciales() {
   awaitingTwoFactor.value = false
   challengeId.value = ''
+  challengeMethod.value = 'Email'
+  usingRecoveryCode.value = false
   verificationCode.value = ''
   verificationDigits.value = Array(6).fill('')
   pendingLoginData.value = null
+}
+
+function toggleRecoveryCode() {
+  usingRecoveryCode.value = !usingRecoveryCode.value
+  verificationCode.value = ''
+  verificationDigits.value = Array(6).fill('')
 }
 
 function focusTwoFactorInput(index) {
@@ -500,7 +524,7 @@ function focusTwoFactorInput(index) {
 }
 
 function setTwoFactorDigit(index, value) {
-  const character = String(value ?? '').slice(-1)
+  const character = String(value ?? '').replace(/\D/g, '').slice(-1)
   verificationDigits.value[index] = character
   verificationCode.value = verificationDigits.value.join('')
 
@@ -522,7 +546,7 @@ function handleTwoFactorKeydown(event, index) {
 }
 
 function pasteTwoFactorCode(event, startIndex) {
-  const pastedCode = event.clipboardData?.getData('text')?.trim()
+  const pastedCode = event.clipboardData?.getData('text')?.replace(/\D/g, '').trim()
   if (!pastedCode) return
 
   const characters = pastedCode.slice(0, verificationDigits.value.length - startIndex).split('')

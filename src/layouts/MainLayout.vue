@@ -25,6 +25,109 @@
 
         <q-space />
 
+        <div class="notification-connection" role="status" aria-live="polite">
+          <span class="notification-connection__dot" :class="{ 'notification-connection__dot--connected': isConnected }" aria-hidden="true"></span>
+          <span>{{
+            status === 'connected'
+              ? 'Conectado'
+              : status === 'connecting'
+                ? 'Conectando'
+                : status === 'reconnecting'
+                  ? 'Reconectando'
+                  : status === 'error'
+                    ? 'Error al conectar'
+                    : 'Desconectado'
+          }}</span>
+        </div>
+
+        <q-btn
+          round
+          flat
+          icon="notifications_none"
+          :aria-label="visibleUnreadCount ? `Notificaciones, ${visibleUnreadCount} sin leer` : 'Notificaciones'"
+          class="notifications-button"
+        >
+          <q-badge v-if="visibleUnreadCount" color="negative" floating rounded>
+            {{ visibleUnreadCount > 99 ? '99+' : visibleUnreadCount }}
+          </q-badge>
+
+          <q-menu anchor="bottom right" self="top right" @show="refreshNotifications">
+            <q-card flat class="notifications-menu">
+              <q-card-section class="notifications-menu__heading">
+                <div>
+                  <strong>Notificaciones</strong>
+                  <span>{{ visibleUnreadCount }} sin leer</span>
+                </div>
+                <q-icon :name="isConnected ? 'cloud_done' : 'cloud_off'" :color="isConnected ? 'positive' : 'negative'" />
+              </q-card-section>
+              <q-separator />
+              <q-list v-if="notifications.length" separator class="notifications-menu__list">
+                <q-item v-for="notification in notifications" :key="notification.id" class="notifications-menu__item" :class="{ 'notifications-menu__item--unread': !notification.isRead }">
+                  <q-item-section avatar>
+                    <q-icon :name="notification.isRead ? 'drafts' : 'mark_email_unread'" :color="notification.isRead ? 'grey-6' : 'primary'" />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label class="notifications-menu__title">{{ notification.title }}</q-item-label>
+                    <q-item-label v-if="notification.systemName" caption>{{ notification.systemName }}</q-item-label>
+                    <q-item-label class="notifications-menu__message" lines="3">{{ notification.message }}</q-item-label>
+                    <q-item-label caption>{{ formatNotificationDate(notification.createdAt) }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side class="notifications-menu__actions">
+                                    <q-btn
+                  v-if="notification.systemName"
+                  flat
+                  dense
+                  no-caps
+                  color="primary"
+                  icon="open_in_new"
+                  label="Ir"
+                  :aria-label="`Ir al sistema ${notification.systemName}`"
+                  @click.stop="goToNotificationSystem(notification)"
+                />
+<q-btn
+                      flat
+                      round
+                      dense
+                      :icon="notification.isRead ? 'mark_email_unread' : 'mark_email_read'"
+                      :aria-label="notification.isRead ? 'Marcar como no leída' : 'Marcar como leída'"
+                      :disable="updatingNotificationIds.includes(notification.id)"
+                      :loading="updatingNotificationIds.includes(notification.id)"
+                      @click.stop="updateNotificationReadState(notification)"
+                    />
+                  </q-item-section>
+                </q-item>
+              </q-list>
+              <div v-else-if="isLoadingNotifications" class="notifications-menu__empty">
+                <q-spinner color="primary" size="24px" />
+                <span>Cargando notificaciones…</span>
+              </div>
+              <div v-else-if="notificationsError" class="notifications-menu__empty notifications-menu__empty--error">
+                <q-icon name="error_outline" size="24px" />
+                <span>{{ notificationsError }}</span>
+                <q-btn flat dense no-caps label="Reintentar" @click="refreshNotifications" />
+              </div>
+              <div v-else class="notifications-menu__empty">
+                <q-icon name="notifications_off" size="24px" />
+                <span>Aún no hay notificaciones.</span>
+              </div>
+              <q-card-section v-if="hasUnreadNotifications" class="notifications-menu__bulk-action">
+                <q-btn
+                  flat
+                  dense
+                  no-caps
+                  color="primary"
+                  label="Marcar todas como leídas"
+                  :loading="isMarkingAllRead"
+                  @click="markAllNotificationsRead"
+                />
+              </q-card-section>
+              <q-card-actions v-if="hasMoreNotifications" align="center" class="notifications-menu__pagination">
+                <q-btn flat dense no-caps color="primary" label="Cargar anteriores" :loading="isLoadingMoreNotifications" @click="loadMoreNotifications" />
+              </q-card-actions>
+            </q-card>
+          </q-menu>
+        </q-btn>
+
         <q-btn
           flat
           no-caps
@@ -142,6 +245,8 @@ import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useAuthStore } from '@/stores/auth.store'
+import { useNotificationsHub } from '@/composables/useNotificationsHub'
+import { useSystemsStore } from '@/stores/systems.store'
 
 const leftDrawerOpen = ref(false)
 const logoutDialogOpen = ref(false)
@@ -149,7 +254,25 @@ const logoutDialogOpen = ref(false)
 const router = useRouter()
 
 const authStore = useAuthStore()
+const systemsStore = useSystemsStore()
 const { itsBirthday } = storeToRefs(authStore)
+const {
+  status,
+  isConnected,
+  notifications,
+  visibleUnreadCount,
+  hasUnreadNotifications,
+  hasMoreNotifications,
+  isLoadingNotifications,
+  isLoadingMoreNotifications,
+  isMarkingAllRead,
+  updatingNotificationIds,
+  notificationsError,
+  refreshNotifications,
+  loadMoreNotifications,
+  updateNotificationReadState,
+  markAllNotificationsRead,
+} = useNotificationsHub()
 
 const userDisplayName = computed(() => {
   const user = authStore.user
@@ -163,6 +286,70 @@ function toggleLeftDrawer() {
 function confirmLogout() {
   authStore.logout()
   router.replace({ name: 'login' })
+}
+
+async function goToNotificationSystem(notification) {
+  const targetName = normalizeNotificationSystemName(notification?.systemName)
+  if (!targetName) return
+  try {
+    if (!systemsStore.systems.length) await systemsStore.loadSystems()
+    const system = systemsStore.systems.find((item) => normalizeNotificationSystemName(item.systemName || item.name) === targetName)
+    if (!system?.url || !authStore.token) return
+    const systemUrl = new URL(system.url, window.location.origin)
+    const basePath = systemUrl.pathname.replace(/\/+$/, '')
+    if (
+      systemUrl.origin === window.location.origin &&
+      (window.location.pathname === basePath || window.location.pathname.startsWith(`${basePath}/`))
+    ) {
+      const route = resolveLocalNotificationRoute(notification)
+      if (route) await router.push(route)
+      return
+    }
+    const url = new URL(system.url, window.location.origin)
+    url.searchParams.set('key', authStore.token)
+    url.searchParams.set('system', system.systemName || system.name)
+    window.location.assign(url.toString())
+  } catch (error) {
+    console.error('No fue posible abrir el sistema de origen:', error)
+  }
+}
+
+function resolveLocalNotificationRoute(notification) {
+  if (notification?.routeName && router.hasRoute(notification.routeName)) {
+    return { name: notification.routeName }
+  }
+  const targetUrl = String(notification?.targetUrl || '').trim()
+  if (targetUrl) {
+    try {
+      const destination = new URL(targetUrl, window.location.origin)
+      if (destination.origin === window.location.origin) {
+        return `${destination.pathname}${destination.search}${destination.hash}`
+      }
+    } catch {
+      // Usa los datos de la notificación para localizar la sección.
+    }
+  }
+  const hint = normalizeNotificationSystemName(
+    [notification?.moduleName, notification?.type, notification?.title, notification?.message]
+      .filter(Boolean)
+      .join(' '),
+  )
+  if (hint.includes('dato personal')) return { name: 'Datos_Personales' }
+  if (hint.includes('perfil')) return { name: 'profile' }
+  return { name: 'home' }
+}
+
+function normalizeNotificationSystemName(value) {
+  return String(value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+}
+
+function formatNotificationDate(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
 }
 
 onMounted(async () => {
@@ -239,6 +426,121 @@ onMounted(async () => {
   background: #fff8fb;
   font-size: 0.8rem;
   font-weight: 700;
+}
+
+.notification-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: 12px;
+  color: #625b67;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.notification-connection__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #c62828;
+  box-shadow: 0 0 0 3px rgba(198, 40, 40, 0.12);
+}
+
+.notification-connection__dot--connected {
+  background: #2e7d32;
+  box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.12);
+}
+
+.notifications-button {
+  margin-right: 10px;
+  color: #6b3c87;
+}
+
+.notifications-menu {
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: min(70vh, 520px);
+}
+
+.notifications-menu__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.notifications-menu__bulk-action {
+  padding: 0 12px 8px;
+  text-align: right;
+}
+
+.notifications-menu__heading strong,
+.notifications-menu__heading span {
+  display: block;
+}
+
+.notifications-menu__heading strong {
+  color: #302936;
+  font-size: 0.95rem;
+}
+
+.notifications-menu__heading span {
+  margin-top: 2px;
+  color: #817986;
+  font-size: 0.72rem;
+}
+
+.notifications-menu__list {
+  max-height: calc(min(70vh, 520px) - 58px);
+  overflow-y: auto;
+}
+
+.notifications-menu__item {
+  min-height: 76px;
+  padding: 12px 16px;
+}
+
+.notifications-menu__item--unread {
+  background: #f8f4fa;
+}
+
+.notifications-menu__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  padding-left: 8px;
+}
+
+.notifications-menu__title {
+  color: #38313d;
+  font-weight: 700;
+}
+
+.notifications-menu__message {
+  margin-top: 3px;
+  color: #625b67;
+  line-height: 1.4;
+}
+
+.notifications-menu__empty {
+  display: flex;
+  min-height: 120px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #817986;
+  font-size: 0.82rem;
+}
+
+.notifications-menu__empty--error {
+  color: #9b1c31;
+}
+
+.notifications-menu__pagination {
+  padding: 4px 12px 10px;
 }
 
 .nav-logout-button:hover {
@@ -618,6 +920,24 @@ onMounted(async () => {
   .nav-logout-button {
     min-width: 38px;
     padding: 0;
+  }
+
+  .notification-connection {
+    gap: 0;
+    margin-right: 6px;
+  }
+
+  .notification-connection > span:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  .notifications-button {
+    margin-right: 4px;
   }
 
   .nav-logout-button :deep(.q-btn__content) {

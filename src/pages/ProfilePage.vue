@@ -455,7 +455,11 @@
               <div class="twofa-status" :class="{ enabled: twofa }">
                 <q-icon :name="twofa ? 'check_circle' : 'cancel'" />
 
-                {{ twofa ? 'Autenticación habilitada' : 'Autenticación deshabilitada' }}
+                {{
+                  twofa
+                    ? (twofaMethod === 'Authenticator' ? 'Autenticación habilitada (Authenticator)' : 'Autenticación habilitada (correo)')
+                    : 'Autenticación deshabilitada'
+                }}
               </div>
             </div>
 
@@ -525,21 +529,36 @@
             <div class="dialog-subtitle">
               {{
                 twofaCodeSent
-                  ? 'Ingresa el código que enviamos a tu correo.'
+                  ? (twofaMethod === 'Authenticator'
+                    ? 'Ingresa el código de seis dígitos que muestra tu aplicación Authenticator.'
+                    : 'Ingresa el código de seis dígitos que enviamos a tu correo.')
                   : twofa
                     ? 'Confirma tu contraseña para deshabilitarla.'
-                    : 'Confirma tu contraseña. Te enviaremos un código a tu correo.'
+                    : 'Confirma tu contraseña y elige cómo quieres recibir el código de verificación.'
               }}
             </div>
           </div>
 
           <q-space />
-          <q-btn flat round dense icon="close" aria-label="Cerrar" @click="dialogTwofa = false" />
+          <q-btn flat round dense icon="close" aria-label="Cerrar" :disable="isUpdatingTwofa" @click="cerrarDialogoTwofa" />
         </div>
 
         <q-separator />
 
         <q-card-section class="q-pa-lg">
+          <q-option-group
+            v-if="!twofa && !twofaCodeSent"
+            v-model="twofaMethod"
+            :options="[
+              { label: 'Correo electrónico', value: 'Email', disable: !emailConfirmed },
+              { label: 'Aplicación Authenticator', value: 'Authenticator' },
+            ]"
+            color="primary"
+            class="q-mb-md"
+          />
+          <q-banner v-if="!twofa && !twofaCodeSent && !emailConfirmed && twofaMethod === 'Email'" dense rounded class="bg-orange-1 text-orange-10 q-mb-md">
+            Para usar el correo, primero confirma la dirección registrada en tu cuenta.
+          </q-banner>
           <q-input
             v-if="twofa || !twofaCodeSent"
             v-model="twofaCurrentPassword"
@@ -551,6 +570,18 @@
             autocomplete="current-password"
             class="dialog-input"
           />
+          <div v-if="twofaCodeSent && twofaMethod === 'Authenticator' && twofaSetup?.authenticatorKey" class="authenticator-setup q-mb-md">
+            <div class="text-subtitle2">Configura tu aplicación</div>
+            <div class="text-body2 q-mt-xs">Escanea el QR con tu aplicación Authenticator o agrega la cuenta manualmente con esta clave.</div>
+            <img v-if="twofaQrDataUrl" :src="twofaQrDataUrl" alt="Código QR para configurar la autenticación en tu aplicación" class="authenticator-setup__qr q-mt-md" />
+            <div class="authenticator-setup__key q-mt-sm" aria-label="Clave de configuración del Authenticator">
+              {{ twofaSetup.authenticatorKey.match(/.{1,4}/g)?.join(' ') || twofaSetup.authenticatorKey }}
+            </div>
+            <q-btn flat dense no-caps color="primary" icon="content_copy" label="Copiar clave" @click="$q.clipboard.copy(twofaSetup.authenticatorKey)" />
+            <div v-if="twofaSetup.authenticatorUri" class="text-caption text-grey-7 q-mt-sm">También puedes copiar la URI de configuración si tu aplicación lo permite.</div>
+            <q-btn v-if="twofaSetup.authenticatorUri" flat dense no-caps color="primary" icon="content_copy" label="Copiar URI" @click="$q.clipboard.copy(twofaSetup.authenticatorUri)" />
+            <q-btn v-if="twofaSetup.authenticatorUri" tag="a" :href="twofaSetup.authenticatorUri" flat dense no-caps color="primary" icon="open_in_new" label="Abrir configuración en la aplicación" />
+          </div>
           <q-input
             v-if="twofaCodeSent"
             v-model="twofaCode"
@@ -567,19 +598,46 @@
         <q-separator />
 
         <q-card-actions class="dialog-actions">
-          <q-btn flat no-caps label="Cancelar" @click="dialogTwofa = false" />
+          <q-btn flat no-caps label="Cancelar" :disable="isUpdatingTwofa" @click="cerrarDialogoTwofa" />
           <q-btn
             unelevated
             no-caps
             color="primary"
-            :label="twofa ? 'Deshabilitar' : twofaCodeSent ? 'Confirmar código' : 'Enviar código'"
+            :label="twofa ? 'Deshabilitar' : twofaCodeSent ? 'Confirmar código' : twofaMethod === 'Authenticator' ? 'Configurar aplicación' : 'Enviar código'"
             :disable="
               isUpdatingTwofa ||
-              (twofa ? !twofaCurrentPassword : twofaCodeSent ? !twofaCode.trim() : !twofaCurrentPassword)
+              (twofa ? !twofaCurrentPassword : twofaCodeSent ? !/^\d{6}$/.test(twofaCode.trim()) : !twofaCurrentPassword || (twofaMethod === 'Email' && !emailConfirmed))
             "
             :loading="isUpdatingTwofa"
             @click="procesarCambioTwofa"
           />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <q-dialog v-model="dialogRecoveryCodes" persistent>
+      <q-card class="password-dialog recovery-codes-dialog">
+        <div class="dialog-header">
+          <div class="dialog-header-icon"><q-icon name="key" /></div>
+          <div>
+            <div class="dialog-title">Guarda tus códigos de recuperación</div>
+            <div class="dialog-subtitle">Cada código puede usarse una sola vez. No volverán a mostrarse.</div>
+          </div>
+        </div>
+        <q-separator />
+        <q-card-section>
+          <div class="recovery-codes-list" aria-label="Códigos de recuperación">
+            <code v-for="code in recoveryCodes" :key="code">{{ code }}</code>
+          </div>
+          <div class="row q-gutter-sm q-mt-md">
+            <q-btn flat no-caps color="primary" icon="content_copy" label="Copiar códigos" @click="$q.clipboard.copy(recoveryCodes.join('\n'))" />
+            <q-btn flat no-caps color="primary" icon="download" label="Descargar" @click="descargarCodigosRecuperacion" />
+          </div>
+          <q-checkbox v-model="recoveryCodesSaved" label="Ya guardé mis códigos en un lugar seguro." class="q-mt-md" />
+        </q-card-section>
+        <q-separator />
+        <q-card-actions class="dialog-actions">
+          <q-btn unelevated no-caps color="primary" label="Continuar al inicio de sesión" :disable="!recoveryCodesSaved" @click="confirmarCodigosGuardados" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -767,6 +825,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRouter } from 'vue-router'
+import QRCode from 'qrcode'
 import { useAuthStore } from '@/stores/auth.store'
 import { usersApi } from '@/api/users.api'
 import { twoFactorApi } from '@/api/two-factor.api'
@@ -842,6 +901,7 @@ async function cargarEstadoDosFactores() {
     emailConfirmed.value = currentUser.emailConfirmed === true
     const enabled = currentUser.twoFactorEnabled ?? currentUser.isTwoFactorEnabled
     if (enabled !== undefined && enabled !== null) twofa.value = Boolean(enabled)
+    if (currentUser.twoFactorMethod) twofaMethod.value = currentUser.twoFactorMethod
   } catch {
     // Se conserva el estado disponible en la sesión si el servicio no devuelve el usuario.
   }
@@ -964,10 +1024,16 @@ const activeTab = ref('personal')
 const twofa = ref(
   Boolean(authStore.user?.twoFactorEnabled ?? authStore.user?.isTwoFactorEnabled ?? false),
 )
+const twofaMethod = ref(authStore.user?.twoFactorMethod || 'Email')
 const dialogTwofa = ref(false)
 const twofaCurrentPassword = ref('')
 const twofaCode = ref('')
 const twofaCodeSent = ref(false)
+const twofaSetup = ref(null)
+const twofaQrDataUrl = ref('')
+const recoveryCodes = ref([])
+const recoveryCodesSaved = ref(false)
+const dialogRecoveryCodes = ref(false)
 const isUpdatingTwofa = ref(false)
 
 // ================================================================
@@ -1072,7 +1138,19 @@ function abrirDialogoTwofa() {
   twofaCurrentPassword.value = ''
   twofaCode.value = ''
   twofaCodeSent.value = false
+  twofaSetup.value = null
+  twofaQrDataUrl.value = ''
+  if (!twofa.value) twofaMethod.value = 'Email'
   dialogTwofa.value = true
+}
+
+function cerrarDialogoTwofa() {
+  dialogTwofa.value = false
+  twofaCurrentPassword.value = ''
+  twofaCode.value = ''
+  twofaCodeSent.value = false
+  twofaSetup.value = null
+  twofaQrDataUrl.value = ''
 }
 
 async function procesarCambioTwofa() {
@@ -1097,41 +1175,92 @@ async function procesarCambioTwofa() {
       dialogTwofa.value = false
       $q.notify({
         type: 'positive',
-        message: 'Autenticación en dos pasos deshabilitada.',
+        message: 'Autenticación deshabilitada. Se cerrará tu sesión para actualizar la seguridad.',
         position: 'top-right',
       })
+      await new Promise((resolve) => window.setTimeout(resolve, 1200))
+      authStore.logout()
+      await router.replace({ name: 'login' })
     } else if (!twofaCodeSent.value) {
-      await twoFactorApi.enable(twofaCurrentPassword.value, 'Email')
+      twofaSetup.value = await twoFactorApi.enable(twofaCurrentPassword.value, twofaMethod.value)
+      if (twofaMethod.value === 'Authenticator' && twofaSetup.value?.authenticatorUri) {
+        try {
+          twofaQrDataUrl.value = await QRCode.toDataURL(twofaSetup.value.authenticatorUri, {
+            errorCorrectionLevel: 'M',
+            margin: 2,
+            width: 240,
+          })
+        } catch {
+          twofaQrDataUrl.value = ''
+        }
+      }
       twofaCodeSent.value = true
       twofaCurrentPassword.value = ''
       $q.notify({
         type: 'positive',
-        message: 'Enviamos un código de verificación a tu correo.',
+        message: twofaMethod.value === 'Authenticator'
+          ? 'Configura tu aplicación Authenticator y escribe el código que muestra.'
+          : 'Enviamos un código de verificación a tu correo.',
         position: 'top-right',
       })
     } else {
-      await twoFactorApi.confirm(twofaCode.value.trim())
+      const confirmation = await twoFactorApi.confirm(twofaCode.value.trim())
       twofa.value = true
+      twofaMethod.value = confirmation?.method || twofaMethod.value
+      twofaSetup.value = null
+      twofaQrDataUrl.value = ''
+      twofaCode.value = ''
       dialogTwofa.value = false
-      $q.notify({
-        type: 'positive',
-        message: 'Autenticación en dos pasos habilitada.',
-        position: 'top-right',
-      })
+      recoveryCodes.value = Array.isArray(confirmation?.recoveryCodes) ? confirmation.recoveryCodes : []
+      if (recoveryCodes.value.length) {
+        recoveryCodesSaved.value = false
+        dialogRecoveryCodes.value = true
+      } else {
+        await cerrarSesionDespuesDeCambioTwofa('Autenticación habilitada. Se cerrará tu sesión para actualizar la seguridad.')
+      }
     }
   } catch (error) {
+    const serverMessage = error.response?.data?.message || error.message || 'No fue posible actualizar la autenticación en dos pasos.'
+    const message = error.response?.status === 429 ? 'Demasiados intentos, espera un momento.' : serverMessage
+    if (twofaCodeSent.value && /configuración del doble factor no existe o expiró|límite de intentos/i.test(serverMessage)) {
+      twofaCodeSent.value = false
+      twofaCode.value = ''
+      twofaSetup.value = null
+      twofaQrDataUrl.value = ''
+    }
     $q.notify({
       type: 'negative',
-      message:
-        error.response?.data?.message ||
-        error.message ||
-        'No fue posible actualizar la autenticación en dos pasos.',
+      message,
       position: 'top-right',
     })
   } finally {
     $q.loading.hide()
     isUpdatingTwofa.value = false
   }
+}
+
+function descargarCodigosRecuperacion() {
+  const archivo = new Blob([recoveryCodes.value.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(archivo)
+  const enlace = document.createElement('a')
+  enlace.href = url
+  enlace.download = 'codigos-recuperacion-ieen.txt'
+  enlace.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function cerrarSesionDespuesDeCambioTwofa(mensaje) {
+  $q.notify({ type: 'positive', message: mensaje, position: 'top-right' })
+  await new Promise((resolve) => window.setTimeout(resolve, 1200))
+  authStore.logout()
+  await router.replace({ name: 'login' })
+}
+
+async function confirmarCodigosGuardados() {
+  if (!recoveryCodesSaved.value) return
+  dialogRecoveryCodes.value = false
+  recoveryCodes.value = []
+  await cerrarSesionDespuesDeCambioTwofa('Guarda los códigos en un lugar seguro. Se cerrará tu sesión para actualizar la seguridad.')
 }
 </script>
 
@@ -1611,6 +1740,53 @@ async function procesarCambioTwofa() {
 .twofa-status.enabled {
   color: #188038;
   font-weight: 600;
+}
+
+.authenticator-setup {
+  padding: 14px;
+  border: 1px solid #e5e8ed;
+  border-radius: 12px;
+  background: #f8f7fa;
+}
+
+.authenticator-setup__key {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff;
+  color: #344054;
+  font-family: monospace;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  overflow-wrap: anywhere;
+}
+
+.authenticator-setup__qr {
+  display: block;
+  width: 240px;
+  height: 240px;
+  max-width: 100%;
+  margin-right: auto;
+  margin-left: auto;
+  padding: 8px;
+  border: 1px solid #e5e8ed;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.recovery-codes-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recovery-codes-list code {
+  padding: 9px;
+  border-radius: 7px;
+  background: #f5f3f7;
+  color: #344054;
+  text-align: center;
+  font-weight: 700;
 }
 
 .disable-security-btn {
